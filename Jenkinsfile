@@ -31,7 +31,7 @@ pipeline {
                         def isAmazon = sh(script: 'cat /etc/os-release | grep -i "amazon" || echo "not amazon"', returnStdout: true).trim()
                         
                         if (isDebian != "not debian") {
-                            sh 'apt-get update && sudo apt-get install -y jq'
+                            sh 'apt-get update && apt-get install -y jq'
                         } else if (isRHEL != "not rhel") {
                             sh 'yum install -y jq'
                         } else if (isAmazon != "not amazon") {
