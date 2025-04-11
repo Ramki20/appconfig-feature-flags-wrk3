@@ -10,11 +10,13 @@ pipeline {
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
         AWS_DEFAULT_REGION    = 'us-east-1'
         CONFIG_DIR            = 'config'
+        SKIP_DEPLOYMENT       = 'false' // Flag to control whether to skip deployment
     }
     
     parameters {
         string(name: 'CONFIG_FILE', defaultValue: 'tst3_feature_flags.json', description: 'Name of the feature flags JSON file')
         booleanParam(name: 'PRESERVE_VALUES', defaultValue: true, description: 'Preserve existing flag values')
+        booleanParam(name: 'FORCE_DEPLOYMENT', defaultValue: false, description: 'Force deployment even if content has not changed')
     }
     
     stages {
@@ -91,11 +93,10 @@ pipeline {
         }
         
         stage('Fetch Current Configuration') {
-            when {
-                expression { return params.PRESERVE_VALUES }
-            }
             steps {
                 script {
+                    env.CURRENT_CONFIG_EXISTS = 'false'
+                    
                     // First, check if the application, configuration profile, and hosted config already exist
                     def appExists = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
                     
@@ -114,17 +115,15 @@ pipeline {
                             
                             if (latestVersionNumber && latestVersionNumber != "None" && latestVersionNumber != "") {
                                 // Retrieve the current configuration content
-								sh """
-								aws appconfig get-hosted-configuration-version \\
-								    --application-id ${applicationId} \\
-								    --configuration-profile-id ${configProfileId} \\
-								    --version-number ${latestVersionNumber} \\
-								    --output text --query Content | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
-								"""                                
+                                sh """
+                                aws appconfig get-hosted-configuration-version \\
+                                    --application-id ${applicationId} \\
+                                    --configuration-profile-id ${configProfileId} \\
+                                    --version-number ${latestVersionNumber} \\
+                                    --output text --query Content | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
+                                """                                
                                 
-                                // Extract the content from the response (skip the metadata)
-                                sh "cat ${WORKSPACE}/merged_config/current_config.json | jq '.Content | fromjson' > ${WORKSPACE}/merged_config/current_config_content.json"
-                                
+                                env.CURRENT_CONFIG_EXISTS = 'true'
                                 echo "Successfully retrieved current configuration."
                             } else {
                                 echo "No hosted configuration versions found. Using local configuration file."
@@ -206,7 +205,47 @@ pipeline {
             }
         }
         
+        stage('Check for Changes') {
+            when {
+                expression { return env.CURRENT_CONFIG_EXISTS == 'true' }
+            }
+            steps {
+                script {
+                    // Compare the current config with the new/merged config, ignoring metadata fields
+                    sh """
+                    # Strip metadata fields from current config (_createdAt, _updatedAt, etc.)
+                    cat ${WORKSPACE}/merged_config/current_config_content.json | jq 'del(._createdAt, ._updatedAt)' > ${WORKSPACE}/merged_config/current_clean.json
+                    
+                    # Prepare new config in the same format
+                    cat ${WORKSPACE}/merged_config/final_config.json | jq 'del(._createdAt, ._updatedAt)' > ${WORKSPACE}/merged_config/new_clean.json
+                    
+                    # Sort keys to ensure consistent comparison
+                    cat ${WORKSPACE}/merged_config/current_clean.json | jq --sort-keys . > ${WORKSPACE}/merged_config/current_clean_sorted.json
+                    cat ${WORKSPACE}/merged_config/new_clean.json | jq --sort-keys . > ${WORKSPACE}/merged_config/new_clean_sorted.json
+                    """
+                    
+                    // Compare the sorted files
+                    def diff = sh(script: "diff ${WORKSPACE}/merged_config/current_clean_sorted.json ${WORKSPACE}/merged_config/new_clean_sorted.json || true", returnStdout: true).trim()
+                    
+                    if (diff == "" && !params.FORCE_DEPLOYMENT) {
+                        echo "No changes detected in configuration (ignoring timestamps). Skipping deployment."
+                        env.SKIP_DEPLOYMENT = 'true'
+                    } else {
+                        if (params.FORCE_DEPLOYMENT) {
+                            echo "Force deployment requested. Proceeding with deployment."
+                        } else {
+                            echo "Changes detected in configuration. Proceeding with deployment."
+                        }
+                        env.SKIP_DEPLOYMENT = 'false'
+                    }
+                }
+            }
+        }
+        
         stage('Initialize Terraform') {
+            when {
+                expression { return env.SKIP_DEPLOYMENT == 'false' }
+            }
             steps {
                 dir('terraform') {
                     sh 'terraform init -reconfigure'
@@ -215,6 +254,9 @@ pipeline {
         }
         
         stage('Terraform Plan') {
+            when {
+                expression { return env.SKIP_DEPLOYMENT == 'false' }
+            }
             steps {
                 dir('terraform') {
                     sh """
@@ -231,6 +273,9 @@ pipeline {
         }
         
         stage('Terraform Apply') {
+            when {
+                expression { return env.SKIP_DEPLOYMENT == 'false' }
+            }
             steps {
                 dir('terraform') {
                     sh 'terraform apply -auto-approve tfplan'
@@ -241,7 +286,13 @@ pipeline {
     
     post {
         success {
-            echo "AWS AppConfig deployment completed successfully!"
+            script {
+                if (env.SKIP_DEPLOYMENT == 'true') {
+                    echo "Deployment skipped - No changes detected in configuration (ignoring timestamps)."
+                } else {
+                    echo "AWS AppConfig deployment completed successfully!"
+                }
+            }
             
             // Optionally, archive the merged configuration for reference
             archiveArtifacts artifacts: "merged_config/final_config.json", allowEmptyArchive: true
