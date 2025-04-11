@@ -97,46 +97,90 @@ pipeline {
                 script {
                     env.CURRENT_CONFIG_EXISTS = 'false'
                     
-                    // First, check if the application, configuration profile, and hosted config already exist
+                    // Check if the application exists
                     def appExists = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
                     
                     if (appExists && appExists != "None" && appExists != "") {
-                        echo "Application exists. Fetching current configuration..."
+                        echo "Application exists with ID: ${appExists}"
                         
-                        // Get the application ID
-                        def applicationId = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text", returnStdout: true).trim()
+                        // Store the application ID
+                        env.APP_ID = appExists
                         
                         // Get the configuration profile ID
-                        def configProfileId = sh(script: "aws appconfig list-configuration-profiles --application-id ${applicationId} --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
+                        def configProfileId = sh(script: "aws appconfig list-configuration-profiles --application-id ${env.APP_ID} --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
                         
-                        if (applicationId && configProfileId && configProfileId != "None" && configProfileId != "") {
+                        if (configProfileId && configProfileId != "None" && configProfileId != "") {
+                            echo "Configuration profile exists with ID: ${configProfileId}"
+                            env.PROFILE_ID = configProfileId
+                            
                             // Get the latest configuration version
-                            def latestVersionNumber = sh(script: "aws appconfig list-hosted-configuration-versions --application-id ${applicationId} --configuration-profile-id ${configProfileId} --query 'Items[0].VersionNumber' --output text || echo ''", returnStdout: true).trim()
+                            def latestVersionNumber = sh(script: "aws appconfig list-hosted-configuration-versions --application-id ${env.APP_ID} --configuration-profile-id ${env.PROFILE_ID} --query 'Items[0].VersionNumber' --output text || echo ''", returnStdout: true).trim()
                             
                             if (latestVersionNumber && latestVersionNumber != "None" && latestVersionNumber != "") {
-                                // Retrieve the current configuration content
-                                sh """
-                                aws appconfig get-hosted-configuration-version \\
-                                    --application-id ${applicationId} \\
-                                    --configuration-profile-id ${configProfileId} \\
-                                    --version-number ${latestVersionNumber} \\
-                                    --output text --query Content | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
-                                """                                
+                                echo "Latest configuration version: ${latestVersionNumber}"
+                                env.LATEST_VERSION = latestVersionNumber
                                 
-                                env.CURRENT_CONFIG_EXISTS = 'true'
-                                echo "Successfully retrieved current configuration."
+                                // Retrieve the current configuration content with proper error handling
+                                def fetchResult = sh(script: """
+                                aws appconfig get-hosted-configuration-version \\
+                                    --application-id ${env.APP_ID} \\
+                                    --configuration-profile-id ${env.PROFILE_ID} \\
+                                    --version-number ${env.LATEST_VERSION} \\
+                                    ${WORKSPACE}/merged_config/encoded_config.txt
+                                """, returnStatus: true)
+                                
+                                if (fetchResult != 0) {
+                                    echo "Failed to fetch config directly to file. Trying alternative method..."
+                                    
+                                    // Alternative method using temp file for content
+                                    def cmdOutput = sh(script: """
+                                    aws appconfig get-hosted-configuration-version \\
+                                        --application-id ${env.APP_ID} \\
+                                        --configuration-profile-id ${env.PROFILE_ID} \\
+                                        --version-number ${env.LATEST_VERSION} > ${WORKSPACE}/merged_config/full_response.json
+                                    """, returnStatus: true)
+                                    
+                                    if (cmdOutput == 0) {
+                                        // Extract content from the full response and decode
+                                        sh """
+                                        cat ${WORKSPACE}/merged_config/full_response.json | jq -r '.Content' > ${WORKSPACE}/merged_config/encoded_config.txt
+                                        cat ${WORKSPACE}/merged_config/encoded_config.txt | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
+                                        """
+                                        
+                                        // Verify the file exists and is not empty
+                                        def fileContent = sh(script: "cat ${WORKSPACE}/merged_config/current_config_content.json || echo ''", returnStdout: true).trim()
+                                        if (fileContent) {
+                                            env.CURRENT_CONFIG_EXISTS = 'true'
+                                            echo "Successfully retrieved current configuration using alternative method."
+                                        } else {
+                                            echo "Failed to decode configuration content. Using local configuration file."
+                                            sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+                                        }
+                                    } else {
+                                        echo "Failed to fetch configuration. Using local configuration file."
+                                        sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+                                    }
+                                } else {
+                                    // Decode the content
+                                    sh "cat ${WORKSPACE}/merged_config/encoded_config.txt | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json"
+                                    env.CURRENT_CONFIG_EXISTS = 'true'
+                                    echo "Successfully retrieved current configuration."
+                                }
                             } else {
                                 echo "No hosted configuration versions found. Using local configuration file."
                                 sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
                             }
                         } else {
-                            echo "Application or Configuration Profile not found. Using local configuration file."
+                            echo "Configuration Profile not found. Using local configuration file."
                             sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
                         }
                     } else {
                         echo "Application does not exist yet. Using local configuration file."
                         sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
                     }
+                    
+                    // For debugging: Display current config content
+                    sh "cat ${WORKSPACE}/merged_config/current_config_content.json || echo 'Cannot display content'"
                 }
             }
         }
@@ -211,30 +255,41 @@ pipeline {
             }
             steps {
                 script {
-                    // Compare the current config with the new/merged config, ignoring metadata fields
+                    // Create a canonical representation of both configs for comparison
                     sh """
-                    # Strip metadata fields from current config (_createdAt, _updatedAt, etc.)
-                    cat ${WORKSPACE}/merged_config/current_config_content.json | jq 'del(._createdAt, ._updatedAt)' > ${WORKSPACE}/merged_config/current_clean.json
+                    # Create normalized versions of both configurations (remove metadata fields)
+                    jq 'del(._createdAt, ._updatedAt) | {flags: .flags, values: .values, version: .version}' ${WORKSPACE}/merged_config/current_config_content.json > ${WORKSPACE}/merged_config/current_clean.json
+                    jq 'del(._createdAt, ._updatedAt) | {flags: .flags, values: .values, version: .version}' ${WORKSPACE}/merged_config/final_config.json > ${WORKSPACE}/merged_config/new_clean.json
                     
-                    # Prepare new config in the same format
-                    cat ${WORKSPACE}/merged_config/final_config.json | jq 'del(._createdAt, ._updatedAt)' > ${WORKSPACE}/merged_config/new_clean.json
+                    # Format both files consistently for comparison
+                    jq --sort-keys . ${WORKSPACE}/merged_config/current_clean.json > ${WORKSPACE}/merged_config/current_sorted.json
+                    jq --sort-keys . ${WORKSPACE}/merged_config/new_clean.json > ${WORKSPACE}/merged_config/new_sorted.json
                     
-                    # Sort keys to ensure consistent comparison
-                    cat ${WORKSPACE}/merged_config/current_clean.json | jq --sort-keys . > ${WORKSPACE}/merged_config/current_clean_sorted.json
-                    cat ${WORKSPACE}/merged_config/new_clean.json | jq --sort-keys . > ${WORKSPACE}/merged_config/new_clean_sorted.json
+                    # For debugging, show content of both files
+                    echo "Current config (sorted):"
+                    cat ${WORKSPACE}/merged_config/current_sorted.json
+                    echo "New config (sorted):"
+                    cat ${WORKSPACE}/merged_config/new_sorted.json
                     """
                     
-                    // Compare the sorted files
-                    def diff = sh(script: "diff ${WORKSPACE}/merged_config/current_clean_sorted.json ${WORKSPACE}/merged_config/new_clean_sorted.json || true", returnStdout: true).trim()
+                    // Calculate MD5 checksums for reliable comparison
+                    def currentMd5 = sh(script: "md5sum ${WORKSPACE}/merged_config/current_sorted.json | cut -d' ' -f1", returnStdout: true).trim()
+                    def newMd5 = sh(script: "md5sum ${WORKSPACE}/merged_config/new_sorted.json | cut -d' ' -f1", returnStdout: true).trim()
                     
-                    if (diff == "" && !params.FORCE_DEPLOYMENT) {
-                        echo "No changes detected in configuration (ignoring timestamps). Skipping deployment."
+                    echo "Current config MD5: ${currentMd5}"
+                    echo "New config MD5: ${newMd5}"
+                    
+                    if (currentMd5 == newMd5 && !params.FORCE_DEPLOYMENT) {
+                        echo "No changes detected in configuration (MD5 checksums match). Skipping deployment."
                         env.SKIP_DEPLOYMENT = 'true'
                     } else {
                         if (params.FORCE_DEPLOYMENT) {
                             echo "Force deployment requested. Proceeding with deployment."
                         } else {
                             echo "Changes detected in configuration. Proceeding with deployment."
+                            
+                            // Show diff for visibility
+                            sh "diff -u ${WORKSPACE}/merged_config/current_sorted.json ${WORKSPACE}/merged_config/new_sorted.json || true"
                         }
                         env.SKIP_DEPLOYMENT = 'false'
                     }
@@ -294,11 +349,14 @@ pipeline {
                 }
             }
             
-            // Optionally, archive the merged configuration for reference
-            archiveArtifacts artifacts: "merged_config/final_config.json", allowEmptyArchive: true
+            // Archive the merged configuration for reference
+            archiveArtifacts artifacts: "merged_config/*.json", allowEmptyArchive: true
         }
         failure {
             echo "AWS AppConfig deployment failed!"
+            
+            // Also archive on failure for debugging
+            archiveArtifacts artifacts: "merged_config/*.json", allowEmptyArchive: true
         }
         always {
             // Clean up workspace
