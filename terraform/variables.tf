@@ -25,7 +25,7 @@ variable "config_version" {
 }
 
 variable "feature_flags_file_path" {
-  description = "Path to the feature flags JSON file"
+  description = "Path to the merged feature flags JSON file"
   type        = string
   default     = "tst_feature_flags.json"
 }
