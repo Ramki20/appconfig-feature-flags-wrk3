@@ -31,11 +31,11 @@ pipeline {
                         def isAmazon = sh(script: 'cat /etc/os-release | grep -i "amazon" || echo "not amazon"', returnStdout: true).trim()
                         
                         if (isDebian != "not debian") {
-                            sh 'sudo apt-get update && sudo apt-get install -y jq'
+                            sh 'apt-get update && sudo apt-get install -y jq'
                         } else if (isRHEL != "not rhel") {
-                            sh 'sudo yum install -y jq'
+                            sh 'yum install -y jq'
                         } else if (isAmazon != "not amazon") {
-                            sh 'sudo yum install -y jq'
+                            sh 'yum install -y jq'
                         } else {
                             error "Unsupported operating system for jq installation. Please install jq manually."
                         }
