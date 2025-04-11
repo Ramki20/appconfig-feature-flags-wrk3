@@ -114,13 +114,13 @@ pipeline {
                             
                             if (latestVersionNumber && latestVersionNumber != "None" && latestVersionNumber != "") {
                                 // Retrieve the current configuration content
-                                sh """
-                                aws appconfig get-hosted-configuration-version \\
-                                    --application-id ${applicationId} \\
-                                    --configuration-profile-id ${configProfileId} \\
-                                    --version-number ${latestVersionNumber} \\
-                                    ${WORKSPACE}/merged_config/current_config.json
-                                """
+								sh """
+								aws appconfig get-hosted-configuration-version \\
+								    --application-id ${applicationId} \\
+								    --configuration-profile-id ${configProfileId} \\
+								    --version-number ${latestVersionNumber} \\
+								    --output text --query Content | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
+								"""                                
                                 
                                 // Extract the content from the response (skip the metadata)
                                 sh "cat ${WORKSPACE}/merged_config/current_config.json | jq '.Content | fromjson' > ${WORKSPACE}/merged_config/current_config_content.json"
