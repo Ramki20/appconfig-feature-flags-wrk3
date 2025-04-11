@@ -92,98 +92,80 @@ pipeline {
             }
         }
         
-        stage('Fetch Current Configuration') {
-            steps {
-                script {
-                    env.CURRENT_CONFIG_EXISTS = 'false'
-                    
-                    // Check if the application exists
-                    def appExists = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
-                    
-                    if (appExists && appExists != "None" && appExists != "") {
-                        echo "Application exists with ID: ${appExists}"
-                        
-                        // Store the application ID
-                        env.APP_ID = appExists
-                        
-                        // Get the configuration profile ID
-                        def configProfileId = sh(script: "aws appconfig list-configuration-profiles --application-id ${env.APP_ID} --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
-                        
-                        if (configProfileId && configProfileId != "None" && configProfileId != "") {
-                            echo "Configuration profile exists with ID: ${configProfileId}"
-                            env.PROFILE_ID = configProfileId
-                            
-                            // Get the latest configuration version
-                            def latestVersionNumber = sh(script: "aws appconfig list-hosted-configuration-versions --application-id ${env.APP_ID} --configuration-profile-id ${env.PROFILE_ID} --query 'Items[0].VersionNumber' --output text || echo ''", returnStdout: true).trim()
-                            
-                            if (latestVersionNumber && latestVersionNumber != "None" && latestVersionNumber != "") {
-                                echo "Latest configuration version: ${latestVersionNumber}"
-                                env.LATEST_VERSION = latestVersionNumber
-                                
-                                // Retrieve the current configuration content with proper error handling
-                                def fetchResult = sh(script: """
-                                aws appconfig get-hosted-configuration-version \\
-                                    --application-id ${env.APP_ID} \\
-                                    --configuration-profile-id ${env.PROFILE_ID} \\
-                                    --version-number ${env.LATEST_VERSION} \\
-                                    ${WORKSPACE}/merged_config/encoded_config.txt
-                                """, returnStatus: true)
-                                
-                                if (fetchResult != 0) {
-                                    echo "Failed to fetch config directly to file. Trying alternative method..."
-                                    
-                                    // Alternative method using temp file for content
-                                    def cmdOutput = sh(script: """
-                                    aws appconfig get-hosted-configuration-version \\
-                                        --application-id ${env.APP_ID} \\
-                                        --configuration-profile-id ${env.PROFILE_ID} \\
-                                        --version-number ${env.LATEST_VERSION} > ${WORKSPACE}/merged_config/full_response.json
-                                    """, returnStatus: true)
-                                    
-                                    if (cmdOutput == 0) {
-                                        // Extract content from the full response and decode
-                                        sh """
-                                        cat ${WORKSPACE}/merged_config/full_response.json | jq -r '.Content' > ${WORKSPACE}/merged_config/encoded_config.txt
-                                        cat ${WORKSPACE}/merged_config/encoded_config.txt | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
-                                        """
-                                        
-                                        // Verify the file exists and is not empty
-                                        def fileContent = sh(script: "cat ${WORKSPACE}/merged_config/current_config_content.json || echo ''", returnStdout: true).trim()
-                                        if (fileContent) {
-                                            env.CURRENT_CONFIG_EXISTS = 'true'
-                                            echo "Successfully retrieved current configuration using alternative method."
-                                        } else {
-                                            echo "Failed to decode configuration content. Using local configuration file."
-                                            sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
-                                        }
-                                    } else {
-                                        echo "Failed to fetch configuration. Using local configuration file."
-                                        sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
-                                    }
-                                } else {
-                                    // Decode the content
-                                    sh "cat ${WORKSPACE}/merged_config/encoded_config.txt | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json"
-                                    env.CURRENT_CONFIG_EXISTS = 'true'
-                                    echo "Successfully retrieved current configuration."
-                                }
-                            } else {
-                                echo "No hosted configuration versions found. Using local configuration file."
-                                sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
-                            }
-                        } else {
-                            echo "Configuration Profile not found. Using local configuration file."
-                            sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
-                        }
-                    } else {
-                        echo "Application does not exist yet. Using local configuration file."
-                        sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
-                    }
-                    
+		stage('Fetch Current Configuration') {
+		    steps {
+		        script {
+		            env.CURRENT_CONFIG_EXISTS = 'false'
+		            
+		            // Check if the application exists
+		            def appExists = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
+		            
+		            if (appExists && appExists != "None" && appExists != "") {
+		                echo "Application exists with ID: ${appExists}"
+		                
+		                // Store the application ID
+		                env.APP_ID = appExists
+		                
+		                // Get the configuration profile ID
+		                def configProfileId = sh(script: "aws appconfig list-configuration-profiles --application-id ${env.APP_ID} --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
+		                
+		                if (configProfileId && configProfileId != "None" && configProfileId != "") {
+		                    echo "Configuration profile exists with ID: ${configProfileId}"
+		                    env.PROFILE_ID = configProfileId
+		                    
+		                    // Get the latest configuration version
+		                    def latestVersionNumber = sh(script: "aws appconfig list-hosted-configuration-versions --application-id ${env.APP_ID} --configuration-profile-id ${env.PROFILE_ID} --query 'Items[0].VersionNumber' --output text || echo ''", returnStdout: true).trim()
+		                    
+		                    if (latestVersionNumber && latestVersionNumber != "None" && latestVersionNumber != "") {
+		                        echo "Latest configuration version: ${latestVersionNumber}"
+		                        env.LATEST_VERSION = latestVersionNumber
+		                        
+		                        // IMPORTANT: The correct way to fetch and decode content
+		                        def fetchResult = sh(script: """
+		                            # Get only the Content field as text and decode it in one step
+		                            aws appconfig get-hosted-configuration-version \\
+		                                --application-id ${env.APP_ID} \\
+		                                --configuration-profile-id ${env.PROFILE_ID} \\
+		                                --version-number ${env.LATEST_VERSION} \\
+		                                --query Content --output text | base64 --decode > ${WORKSPACE}/merged_config/current_config_content.json
+		                        """, returnStatus: true)
+		                        
+		                        if (fetchResult == 0) {
+		                            // Verify the file exists, is not empty, and is valid JSON
+		                            def validJson = sh(script: "jq . ${WORKSPACE}/merged_config/current_config_content.json >/dev/null 2>&1", returnStatus: true)
+		                            
+		                            if (validJson == 0) {
+		                                env.CURRENT_CONFIG_EXISTS = 'true'
+		                                echo "Successfully retrieved and decoded current configuration."
+		                                
+		                                // Debug: Show the content
+		                                sh "echo 'Current config content:' && jq . ${WORKSPACE}/merged_config/current_config_content.json || echo 'Could not display JSON'"
+		                            } else {
+		                                echo "Retrieved file is not valid JSON. Using local configuration file."
+		                                sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+		                            }
+		                        } else {
+		                            echo "Failed to fetch or decode configuration. Using local configuration file."
+		                            sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+		                        }
+		                    } else {
+		                        echo "No hosted configuration versions found. Using local configuration file."
+		                        sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+		                    }
+		                } else {
+		                    echo "Configuration Profile not found. Using local configuration file."
+		                    sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+		                }
+		            } else {
+		                echo "Application does not exist yet. Using local configuration file."
+		                sh "cp ${CONFIG_DIR}/${params.CONFIG_FILE} ${WORKSPACE}/merged_config/current_config_content.json"
+		            }
+		            
                     // For debugging: Display current config content
                     sh "cat ${WORKSPACE}/merged_config/current_config_content.json || echo 'Cannot display content'"
-                }
-            }
-        }
+		        }
+		    }
+		}
         
         stage('Merge Configuration') {
             when {
