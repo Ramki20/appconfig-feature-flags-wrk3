@@ -13,7 +13,7 @@ pipeline {
     }
     
     parameters {
-        string(name: 'CONFIG_FILE', defaultValue: 'tst_feature_flags.json', description: 'Name of the feature flags JSON file')
+        string(name: 'CONFIG_FILE', defaultValue: 'tst3_feature_flags.json', description: 'Name of the feature flags JSON file')
         booleanParam(name: 'PRESERVE_VALUES', defaultValue: true, description: 'Preserve existing flag values')
     }
     
