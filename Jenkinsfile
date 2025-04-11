@@ -25,20 +25,7 @@ pipeline {
                     def jqInstalled = sh(script: 'which jq || echo "not installed"', returnStdout: true).trim()
                     if (jqInstalled == "not installed") {
                         echo "Installing jq..."
-                        // Check the operating system and install accordingly
-                        def isDebian = sh(script: 'cat /etc/os-release | grep -i "debian\\|ubuntu" || echo "not debian"', returnStdout: true).trim()
-                        def isRHEL = sh(script: 'cat /etc/os-release | grep -i "rhel\\|centos\\|fedora" || echo "not rhel"', returnStdout: true).trim()
-                        def isAmazon = sh(script: 'cat /etc/os-release | grep -i "amazon" || echo "not amazon"', returnStdout: true).trim()
-                        
-                        if (isDebian != "not debian") {
-                            sh 'apt-get update && apt-get install -y jq'
-                        } else if (isRHEL != "not rhel") {
-                            sh 'yum install -y jq'
-                        } else if (isAmazon != "not amazon") {
-                            sh 'yum install -y jq'
-                        } else {
-                            error "Unsupported operating system for jq installation. Please install jq manually."
-                        }
+                        sh 'apt-get update && sudo apt-get install -y jq'
                     } else {
                         echo "jq is already installed"
                     }
@@ -47,32 +34,28 @@ pipeline {
                     def awsInstalled = sh(script: 'which aws || echo "not installed"', returnStdout: true).trim()
                     if (awsInstalled == "not installed") {
                         echo "Installing AWS CLI..."
-                        def isDebian = sh(script: 'cat /etc/os-release | grep -i "debian\\|ubuntu" || echo "not debian"', returnStdout: true).trim()
-                        def isRHEL = sh(script: 'cat /etc/os-release | grep -i "rhel\\|centos\\|fedora" || echo "not rhel"', returnStdout: true).trim()
-                        def isAmazon = sh(script: 'cat /etc/os-release | grep -i "amazon" || echo "not amazon"', returnStdout: true).trim()
                         
-                        if (isDebian != "not debian") {
-                            sh '''
-                            apt-get update
-                            apt-get install -y python3-pip
-                            pip3 install --upgrade awscli
-                            '''
-                        } else if (isRHEL != "not rhel" || isAmazon != "not amazon") {
-                            sh '''
-                            yum install -y python3-pip
-                            pip3 install --upgrade awscli
-                            '''
-                        } else {
-                            // Generic installation using pip as fallback
+                        // Try to install using apt
+                        sh '''
+                        apt-get update
+                        apt-get install -y awscli
+                        '''
+                        
+                        // Verify AWS CLI installation
+                        def awsVerify = sh(script: 'which aws || echo "not installed"', returnStdout: true).trim()
+                        if (awsVerify == "not installed") {
+                            echo "AWS CLI not available via apt. Installing AWS CLI v2 from AWS directly..."
                             sh '''
                             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-                            unzip awscliv2.zip
+                            unzip -o awscliv2.zip
                             ./aws/install
+                            echo "export PATH=\$PATH:/usr/local/bin" >> ~/.bashrc
+                            export PATH=\$PATH:/usr/local/bin
                             '''
                         }
                         
-                        // Verify AWS CLI installation
-                        sh 'aws --version'
+                        // Final verification
+                        sh 'aws --version || echo "AWS CLI installation failed"'
                     } else {
                         echo "AWS CLI is already installed"
                     }
@@ -114,22 +97,22 @@ pipeline {
             steps {
                 script {
                     // First, check if the application, configuration profile, and hosted config already exist
-                    def appExists = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text", returnStdout: true).trim()
+                    def appExists = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
                     
-                    if (appExists) {
+                    if (appExists && appExists != "None" && appExists != "") {
                         echo "Application exists. Fetching current configuration..."
                         
                         // Get the application ID
                         def applicationId = sh(script: "aws appconfig list-applications --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text", returnStdout: true).trim()
                         
                         // Get the configuration profile ID
-                        def configProfileId = sh(script: "aws appconfig list-configuration-profiles --application-id ${applicationId} --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text", returnStdout: true).trim()
+                        def configProfileId = sh(script: "aws appconfig list-configuration-profiles --application-id ${applicationId} --query \"Items[?Name=='${env.CONFIG_FILE_NAME}'].Id\" --output text || echo ''", returnStdout: true).trim()
                         
-                        if (applicationId && configProfileId) {
+                        if (applicationId && configProfileId && configProfileId != "None" && configProfileId != "") {
                             // Get the latest configuration version
-                            def latestVersionNumber = sh(script: "aws appconfig list-hosted-configuration-versions --application-id ${applicationId} --configuration-profile-id ${configProfileId} --query 'Items[0].VersionNumber' --output text", returnStdout: true).trim()
+                            def latestVersionNumber = sh(script: "aws appconfig list-hosted-configuration-versions --application-id ${applicationId} --configuration-profile-id ${configProfileId} --query 'Items[0].VersionNumber' --output text || echo ''", returnStdout: true).trim()
                             
-                            if (latestVersionNumber && latestVersionNumber != "None") {
+                            if (latestVersionNumber && latestVersionNumber != "None" && latestVersionNumber != "") {
                                 // Retrieve the current configuration content
                                 sh """
                                 aws appconfig get-hosted-configuration-version \\
