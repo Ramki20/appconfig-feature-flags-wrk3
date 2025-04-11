@@ -42,6 +42,40 @@ pipeline {
                     } else {
                         echo "jq is already installed"
                     }
+                    
+                    // Check if AWS CLI is installed, if not, install it
+                    def awsInstalled = sh(script: 'which aws || echo "not installed"', returnStdout: true).trim()
+                    if (awsInstalled == "not installed") {
+                        echo "Installing AWS CLI..."
+                        def isDebian = sh(script: 'cat /etc/os-release | grep -i "debian\\|ubuntu" || echo "not debian"', returnStdout: true).trim()
+                        def isRHEL = sh(script: 'cat /etc/os-release | grep -i "rhel\\|centos\\|fedora" || echo "not rhel"', returnStdout: true).trim()
+                        def isAmazon = sh(script: 'cat /etc/os-release | grep -i "amazon" || echo "not amazon"', returnStdout: true).trim()
+                        
+                        if (isDebian != "not debian") {
+                            sh '''
+                            apt-get update
+                            apt-get install -y python3-pip
+                            pip3 install --upgrade awscli
+                            '''
+                        } else if (isRHEL != "not rhel" || isAmazon != "not amazon") {
+                            sh '''
+                            yum install -y python3-pip
+                            pip3 install --upgrade awscli
+                            '''
+                        } else {
+                            // Generic installation using pip as fallback
+                            sh '''
+                            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                            unzip awscliv2.zip
+                            ./aws/install
+                            '''
+                        }
+                        
+                        // Verify AWS CLI installation
+                        sh 'aws --version'
+                    } else {
+                        echo "AWS CLI is already installed"
+                    }
                 }
             }
         }
